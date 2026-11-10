@@ -98,6 +98,7 @@ label.oi{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-to
     </div>
     <input type="file" id="pic" accept="image/*" capture="environment" hidden>
     <div id="reader" hidden></div>
+    <div id="scanInfo" class="t" style="margin-top:6px"></div>
     <div id="tmp" hidden></div>
   </div>
   <button class="btn big" id="submit" type="button" style="margin-bottom:24px">送出登記</button>
@@ -121,6 +122,7 @@ label.oi{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-to
     </div>
     <input type="file" id="scFile" accept="image/*" capture="environment" hidden>
     <div id="scReader" hidden style="margin-top:10px;border-radius:10px;overflow:hidden"></div>
+    <div id="scInfo" class="t" style="margin-top:6px"></div>
     <div id="scTmp" hidden></div>
     <div id="scList" style="margin-top:12px"></div>
   </div>
@@ -128,7 +130,7 @@ label.oi{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-to
 </main>
 <div id="toast"></div>
 
-<script src="config.js"></script>
+<script>document.write('<script src="config.js?_='+Date.now()+'"><\/script>')</script>
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
 const OTHER=['福利品','無此商品','無法復原瑕疵商品','現場售出','小舞台拍賣'];
@@ -139,6 +141,7 @@ const LABEL={'借出':'借用人','歸還':'歸還人','贈出':'領取人','其
 const WHN={'17F':'17樓','10F':'中正10樓'};
 const $=id=>document.getElementById(id);
 /* 設定（API_URL、SCAN_PREFIXES）放在同資料夾的 config.js，之後更新 index.html 不需要再改設定 */
+function prefixTip(){const P=typeof SCAN_PREFIXES!=='undefined'?SCAN_PREFIXES:[];return '（目前設定只接受開頭：'+P.join('、')+'；要取消限制，請把 config.js 的 SCAN_PREFIXES 改成 []）'}
 function okPrefix(t){const P=typeof SCAN_PREFIXES!=='undefined'?SCAN_PREFIXES:[];return !P.length||P.some(p=>String(t).startsWith(p))}
 function getToken(){
   let t='';
@@ -226,7 +229,7 @@ async function fetchInfo(list){
 function commit(d){
   const inp=d.querySelector('.bc'),c=inp.value.trim();
   if(!c)return false;
-  if(!okPrefix(c)){toast('已略過：'+c+'（開頭不符，不是商品條碼）');inp.value='';paint(d);updateCnt();return false}
+  if(!okPrefix(c)){toast('已略過：'+c+'（開頭不符）'+prefixTip());inp.value='';paint(d);updateCnt();return false}
   if(rows().some(x=>x!==d&&x.querySelector('.bc').value.trim()===c)){toast('此條碼已在清單中');inp.value='';paint(d);updateCnt();return false}
   delete INFO[c];d.dataset.manual='';paint(d);setRowLoc(d);updateCnt();fetchInfo([c]);
   return true;
@@ -327,20 +330,45 @@ $('loc').onchange=updateLocHint;
    1) 需在短時間內連續讀到兩次相同結果才採用（過濾偶發的讀錯）
    2) 同一條碼 4 秒內不重複
    3) 採用一筆後 1.5 秒內忽略其他條碼（例如同張標籤上的第二個條碼） */
-function makeGate(){
+/* 標準零售條碼（EAN-13 / UPC-A）檢查碼正確者可信度高，讀到一次就採用 */
+function checkOk(t){
+  if(!/^\d{12,13}$/.test(t))return false;
+  const d=t.split('').map(Number),chk=d.pop();
+  let s=0;
+  for(let i=d.length-1,w=3;i>=0;i--,w=w===3?1:3)s+=d[i]*w;
+  return (10-s%10)%10===chk;
+}
+function makeGate(info){
+  info=info||function(){};
   const reads=[];let lastCode='',lastAt=-1e12,lastAny=-1e12;
   return function(t){
     t=String(t).trim();
     const n=Date.now();
-    if(!t||!okPrefix(t))return false;
+    if(!t)return false;
+    if(!okPrefix(t)){info('讀到 '+t+'：開頭不符，已略過'+prefixTip());return false}
     if(t===lastCode&&n-lastAt<4000){lastAt=n;return false}
     if(n-lastAny<1500)return false;
-    reads.push({t,at:n});
-    while(reads.length&&n-reads[0].at>1200)reads.shift();
-    if(reads.filter(r=>r.t===t).length<2)return false;
+    if(!checkOk(t)){
+      reads.push({t,at:n});
+      while(reads.length&&n-reads[0].at>1200)reads.shift();
+      if(reads.filter(r=>r.t===t).length<2){info('讀到 '+t+'，請保持穩定以確認…');return false}
+    }
     reads.length=0;lastCode=t;lastAt=n;lastAny=n;
+    info('已加入 '+t);
     return true;
   };
+}
+/* 啟動相機：優先要求高解析度，失敗再退回一般設定；並嘗試開啟連續對焦 */
+async function startCam(sc,onRead){
+  const box={fps:10,qrbox:(w,h)=>({width:Math.floor(w*0.9),height:Math.floor(Math.min(w,h)*0.5)})};
+  try{
+    await sc.start({facingMode:'environment'},Object.assign({videoConstraints:{facingMode:'environment',width:{ideal:1920},height:{ideal:1080}}},box),onRead,()=>{});
+  }catch(e){
+    const n=(e&&e.name)||'',msg=String((e&&e.message)||e||'');
+    if(n==='NotAllowedError'||/permission|denied|not allowed/i.test(msg))throw e;
+    await sc.start({facingMode:'environment'},box,onRead,()=>{});
+  }
+  try{await sc.applyVideoConstraints({advanced:[{focusMode:'continuous'}]})}catch(e){}
 }
 async function startScan(){
   if(!window.Html5Qrcode){toast('掃描元件載入失敗，請手動輸入');return}
@@ -348,14 +376,15 @@ async function startScan(){
   const F=window.Html5QrcodeSupportedFormats;
   const cfg={verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}};
   if(F)cfg.formatsToSupport=[F.EAN_13,F.EAN_8,F.UPC_A,F.UPC_E,F.CODE_128,F.CODE_39,F.QR_CODE];
-  const gate=makeGate();
+  const gate=makeGate(m=>{$('scanInfo').textContent=m});
+  $('scanInfo').textContent='請把條碼放大到填滿框的一半以上寬度，保持穩定、避免反光';
   scanner=new Html5Qrcode('reader',cfg);
   try{
-    await scanner.start({facingMode:'environment'},{fps:10,qrbox:(w,h)=>({width:Math.floor(w*0.9),height:Math.floor(Math.min(w,h)*0.5)})},t=>{
+    await startCam(scanner,t=>{
       if(!gate(t))return;
       t=t.trim();
       if(pushCode(t)){navigator.vibrate&&navigator.vibrate(60);toast('已加入：'+t,1200)}
-    },()=>{});
+    });
   }catch(e){
     const n=(e&&e.name)||'',msg=String((e&&e.message)||e||'');
     const blocked=n==='NotAllowedError'||/permission|denied|not allowed/i.test(msg);
@@ -365,7 +394,7 @@ async function startScan(){
 }
 async function stopScan(){
   try{if(scanner){await scanner.stop();scanner.clear()}}catch(e){}
-  scanner=null;$('reader').hidden=true;$('scanBtn').textContent='掃描';
+  scanner=null;$('reader').hidden=true;$('scanInfo').textContent='';$('scanBtn').textContent='掃描';
 }
 $('scanBtn').onclick=()=>scanner?stopScan():startScan();
 $('picBtn').onclick=()=>$('pic').click();
@@ -376,7 +405,7 @@ $('pic').onchange=async e=>{
     const h=new Html5Qrcode('tmp');
     const t=await h.scanFile(f,false);
     const c=String(t).trim();
-    toast(!okPrefix(c)?'讀到的是 '+c+'，開頭不符，已略過。請只對準商品條碼再拍':pushCode(c)?'已加入：'+c:'此條碼已在清單中',3500);
+    toast(!okPrefix(c)?'讀到的是 '+c+'，開頭不符，已略過'+prefixTip():pushCode(c)?'已加入：'+c:'此條碼已在清單中',3500);
   }catch(err){toast('讀不到條碼，請拍近一點、對焦後再試')}
 };
 
@@ -536,7 +565,7 @@ async function scFlush(){
 function scRecord(code){
   code=String(code).trim();
   if(!code)return;
-  if(!okPrefix(code)){toast('已略過：'+code+'（開頭不符，不是商品條碼）');return}
+  if(!okPrefix(code)){toast('已略過：'+code+'（開頭不符）'+prefixTip());return}
   SC.unshift({id:++scSeq,code,ts:Date.now(),state:'queued',name:'',found:false,err:''});
   if(SC.length>300)SC.length=300;
   renderSc();scFlush();
@@ -566,14 +595,15 @@ async function startScan2(){
   const F=window.Html5QrcodeSupportedFormats;
   const cfg={verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}};
   if(F)cfg.formatsToSupport=[F.EAN_13,F.EAN_8,F.UPC_A,F.UPC_E,F.CODE_128,F.CODE_39,F.QR_CODE];
-  const gate2=makeGate();
+  const gate2=makeGate(m=>{$('scInfo').textContent=m});
+  $('scInfo').textContent='請把條碼放大到填滿框的一半以上寬度，保持穩定、避免反光';
   sc2=new Html5Qrcode('scReader',cfg);
   try{
-    await sc2.start({facingMode:'environment'},{fps:10,qrbox:(w,h)=>({width:Math.floor(w*0.9),height:Math.floor(Math.min(w,h)*0.5)})},t=>{
+    await startCam(sc2,t=>{
       if(!gate2(t))return;
       t=t.trim();
       scRecord(t);navigator.vibrate&&navigator.vibrate(60);toast('已記錄：'+t,1200);
-    },()=>{});
+    });
   }catch(e){
     const n=(e&&e.name)||'',msg=String((e&&e.message)||e||'');
     const blocked=n==='NotAllowedError'||/permission|denied|not allowed/i.test(msg);
@@ -583,7 +613,7 @@ async function startScan2(){
 }
 async function stopScan2(){
   try{if(sc2){await sc2.stop();sc2.clear()}}catch(e){}
-  sc2=null;$('scReader').hidden=true;$('scScan').textContent='掃描';
+  sc2=null;$('scReader').hidden=true;$('scInfo').textContent='';$('scScan').textContent='掃描';
 }
 $('scScan').onclick=()=>sc2?stopScan2():startScan2();
 $('scPic').onclick=()=>$('scFile').click();
@@ -594,7 +624,7 @@ $('scFile').onchange=async e=>{
     const h=new Html5Qrcode('scTmp');
     const t=await h.scanFile(f,false);
     const c=String(t).trim();
-    if(okPrefix(c)){scRecord(c);toast('已記錄：'+c,1500)}else toast('讀到的是 '+c+'，開頭不符，已略過。請只對準商品條碼再拍',3500);
+    if(okPrefix(c)){scRecord(c);toast('已記錄：'+c,1500)}else toast('讀到的是 '+c+'，開頭不符，已略過'+prefixTip(),3500);
   }catch(err){toast('讀不到條碼，請拍近一點、對焦後再試')}
 };
 
