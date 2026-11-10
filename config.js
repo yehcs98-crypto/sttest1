@@ -5,4 +5,4 @@ const API_URL = 'https://script.google.com/macros/s/AKfycbzKooPEndxmn5udON4cPYeu
 
 // 2) 只接受這些開頭的條碼，避免標籤上的另一個條碼被一起記進去。
 //    目前設定為只接受「4」開頭；要加其他開頭可寫成 ['4', '2']；改成 [] 代表全部接受。
-const SCAN_PREFIXES = ['4'];
+const SCAN_PREFIXES = ['4', '6'];
