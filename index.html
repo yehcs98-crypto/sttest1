@@ -44,6 +44,12 @@ input[type=checkbox]{width:20px;height:20px;padding:0;flex:none;accent-color:var
 summary{list-style:none;cursor:pointer}
 summary::-webkit-details-marker{display:none}
 .osum{display:flex;align-items:center}
+.spbox{border-radius:12px;padding:12px;margin-top:10px;overflow:hidden;font-size:14px}
+.spbox.ok{border:2px solid var(--back)}
+.spbox.no{border:2px solid var(--out)}
+.sph{font-size:20px;font-weight:700;margin-bottom:4px}
+.spbox.ok .sph{color:var(--back)}
+.spbox.no .sph{color:var(--out)}
 .osum::after,.gp summary::after{content:'▾';margin-left:auto;padding-left:8px;color:var(--mu);transition:transform .2s}
 details[open]>summary::after{transform:rotate(180deg)}
 label.oi{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-top:1px solid var(--bd);margin:0;font-size:14px;color:var(--tx);cursor:pointer}
@@ -102,6 +108,28 @@ label.oi{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-to
     <div id="tmp" hidden></div>
   </div>
   <button class="btn big" id="submit" type="button" style="margin-bottom:24px">送出登記</button>
+
+  <details class="card" id="spCard">
+    <summary class="osum"><span><b>查找樣品</b> <span class="t" id="spSum"></span></span></summary>
+    <div class="t" style="margin:10px 0 8px">上傳 Excel 樣品清單後，掃碼就能立刻看出是不是清單中的樣品（比對 D 欄或 E 欄的條碼，符合任一欄即可）。每次查找都會記錄在試算表的「樣品查找紀錄」分頁。</div>
+    <label for="spList">樣品清單</label>
+    <div class="row"><select id="spList"><option value="">請選擇樣品清單</option></select><button class="btn ghost" id="spReload" type="button">重新整理</button></div>
+    <div class="t" id="spLine" style="margin-top:4px"></div>
+    <div style="margin-top:12px"><button class="btn ghost" id="spPick" type="button">上傳 Excel 樣品清單</button><input type="file" id="spFile" accept=".xlsx,.xls,.xlsm,.csv" hidden></div>
+    <div id="spUp"></div>
+    <label for="spCode">掃描或輸入條碼</label>
+    <input id="spCode" placeholder="掃描或輸入條碼，按 Enter 查找" autocomplete="off" autocapitalize="off" enterkeyhint="done">
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="spScan" type="button">掃描</button>
+      <button class="btn ghost" id="spPic" type="button">照片</button>
+    </div>
+    <input type="file" id="spPicFile" accept="image/*" capture="environment" hidden>
+    <div id="spReader" hidden style="margin-top:10px;border-radius:10px;overflow:hidden"></div>
+    <div id="spInfo" class="t" style="margin-top:6px"></div>
+    <div id="spTmp" hidden></div>
+    <div id="spResult"></div>
+    <div id="spHist" style="margin-top:12px"></div>
+  </details>
 </section>
 
 <section id="p2" hidden>
@@ -132,6 +160,7 @@ label.oi{display:flex;gap:10px;align-items:flex-start;padding:8px 10px;border-to
 
 <script>document.write('<script src="config.js?_='+Date.now()+'"><\/script>')</script>
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 const OTHER=['福利品','無此商品','無法復原瑕疵商品','現場售出','小舞台拍賣'];
 const OTH_LOC=['無','17F','10F','無此商品'];
@@ -152,7 +181,7 @@ function getToken(){
 async function run(fn,...a){
   if(typeof API_URL==='undefined'||!/^https:\/\/script\.google\.com\//.test(API_URL))throw new Error('尚未設定 API_URL（請確認 config.js 已上傳並填入網址）');
   const body={token:getToken(),action:fn};
-  if(fn==='lookup')body.codes=a[0];else if(fn==='addLogs'||fn==='addScans')body.list=a[0];
+  if(fn==='lookup')body.codes=a[0];else if(fn==='addLogs'||fn==='addScans')body.list=a[0];else if(a[0]&&typeof a[0]==='object')Object.assign(body,a[0]);
   const r=await fetch(API_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify(body)});
   const j=await r.json();
   if(!j.ok){
@@ -371,6 +400,7 @@ async function startCam(sc,onRead){
   try{await sc.applyVideoConstraints({advanced:[{focusMode:'continuous'}]})}catch(e){}
 }
 async function startScan(){
+  stopSp();
   if(!window.Html5Qrcode){toast('掃描元件載入失敗，請手動輸入');return}
   $('reader').hidden=false;$('scanBtn').textContent='關閉';
   const F=window.Html5QrcodeSupportedFormats;
@@ -628,10 +658,207 @@ $('scFile').onchange=async e=>{
   }catch(err){toast('讀不到條碼，請拍近一點、對焦後再試')}
 };
 
+/* ---------- 查找樣品：上傳 Excel 樣品清單，掃碼立即比對（D 欄或 E 欄條碼擇一），並記錄到試算表 ---------- */
+let SPL=[],SPD=null,SPU=null,spSeq=0,spBusy=false,spLoaded=false,sp3=null;
+const SPH=[];
+const SP_KEYS=[3,4];  /* D、E 欄（從 0 算起） */
+const spNorm=s=>String(s==null?'':s).replace(/\s+/g,'').toUpperCase();
+function spSetSum(){$('spSum').textContent=SPD?'｜'+SPD.name+'（'+SPD.rows.length+' 筆）':''}
+
+async function spLoadLists(keep){
+  try{SPL=await run('getSampleLists',{})}
+  catch(e){toast('讀取樣品清單失敗：'+((e&&e.message)||''),4000);return}
+  $('spList').innerHTML='<option value="">請選擇樣品清單</option>'+SPL.map(l=>`<option value="${esc(l.name)}">${esc(l.name)}（${l.rows} 筆）</option>`).join('');
+  let want=keep||'';
+  if(!want){try{want=localStorage.getItem('wh_sp_list')||''}catch(e){}}
+  if(want&&SPL.some(l=>l.name===want)){$('spList').value=want;await spSelect(want)}
+  else if(!SPL.length)$('spLine').textContent='目前沒有樣品清單，請先上傳 Excel';
+}
+async function spSelect(name){
+  SPD=null;spSetSum();$('spResult').innerHTML='';
+  if(!name){$('spLine').textContent='';return}
+  $('spLine').textContent='載入清單中…';
+  try{
+    const d=await run('getSampleList',{name});
+    const idx=new Map();
+    d.rows.forEach((r,i)=>{SP_KEYS.forEach(c=>{
+      const k=spNorm(r[c]);
+      if(!k)return;
+      if(!idx.has(k))idx.set(k,[]);
+      const a=idx.get(k);
+      if(!a.includes(i))a.push(i);
+    })});
+    SPD={name:d.name,headers:d.headers,rows:d.rows,idx};
+    try{localStorage.setItem('wh_sp_list',name)}catch(e){}
+    $('spLine').textContent='已載入 '+d.rows.length+' 筆，可以開始掃碼';
+  }catch(e){$('spLine').textContent='載入失敗：'+((e&&e.message)||'')}
+  spSetSum();
+}
+$('spList').onchange=()=>spSelect($('spList').value);
+$('spReload').onclick=()=>spLoadLists($('spList').value);
+
+function spCheck(code){
+  if(!SPD)return null;
+  const k=spNorm(code),a=SPD.idx.get(k)||[];
+  if(!a.length)return {hit:false,by:'',row:null,n:0};
+  const r=SPD.rows[a[0]];
+  return {hit:true,by:spNorm(r[3])===k?'D':'E',row:r,n:a.length};
+}
+function spShow(code,res){
+  const el=$('spResult');
+  if(!res){el.innerHTML='<div class="spbox no"><div class="sph">請先選擇或上傳樣品清單</div></div>';return}
+  if(!res.hit){el.innerHTML=`<div class="spbox no"><div class="sph">✗ 不在清單中</div><div class="t">${esc(code)}</div></div>`;return}
+  const H=SPD.headers,r=res.row;
+  const ic=H.findIndex(h=>/圖片|image/i.test(String(h)));
+  const lines=r.map((v,i)=>(!v||i===ic)?'':`<div><span class="t">${esc(H[i]||'欄'+(i+1))}</span> ${esc(v)}</div>`).join('');
+  const img=ic>=0&&/^https?:\/\//i.test(r[ic])?`<img src="${esc(r[ic])}" alt="" referrerpolicy="no-referrer" style="max-width:120px;max-height:120px;border-radius:8px;float:right;margin-left:8px" onerror="this.remove()">`:'';
+  el.innerHTML=`<div class="spbox ok">${img}<div class="sph">✓ 是樣品</div>${lines}${res.n>1?`<div class="t">清單中另有 ${res.n-1} 筆相同條碼</div>`:''}</div>`;
+}
+function spRender(){
+  $('spHist').innerHTML=SPH.slice(0,10).map(i=>{
+    const t=new Date(i.ts).toLocaleTimeString('zh-TW',{hour12:false});
+    const st=i.state==='ok'?'<span class="badge b-back">已記錄</span>':i.state==='fail'?`<button class="btn ghost" data-spretry="${i.id}" type="button">重試</button>`:'<span class="badge b-oth">傳送中…</span>';
+    const nm=i.hit&&i.row?esc(i.row[3]||i.row[4]||''):'<span style="color:var(--out)">不在清單</span>';
+    const er=i.state==='fail'?' <span style="color:var(--out)">失敗：'+esc(i.err)+'</span>':'';
+    return `<div class="log"><div class="t">${t}　${i.hit?'✓':'✗'}</div><div class="top"><span class="c">${esc(i.code)}</span>${st}</div><div class="m">${nm}${er}</div></div>`;
+  }).join('');
+}
+async function spFlush(){
+  if(spBusy)return;spBusy=true;
+  try{
+    for(;;){
+      const batch=SPH.filter(i=>i.state==='queued').reverse().slice(0,50);
+      if(!batch.length)break;
+      batch.forEach(i=>{i.state='sending'});spRender();
+      try{
+        const res=await run('addSampleScans',{list:batch.map(i=>({code:i.code,ts:i.ts,list:i.list,hit:i.hit,by:i.by,row:i.row?i.row.slice(0,12):[]}))});
+        batch.forEach((i,k)=>{const r=res[k]||{};if(r.ok)i.state='ok';else{i.state='fail';i.err=r.error||'未知錯誤'}});
+      }catch(e){batch.forEach(i=>{i.state='fail';i.err=(e&&e.message)||'連線失敗'})}
+      spRender();
+    }
+  }finally{spBusy=false}
+}
+function spRecord(code){
+  code=String(code).trim();
+  if(!code)return;
+  const res=spCheck(code);
+  spShow(code,res);
+  if(!res)return;
+  navigator.vibrate&&navigator.vibrate(res.hit?60:[60,60,60]);
+  SPH.unshift({id:++spSeq,code,ts:Date.now(),list:SPD.name,hit:res.hit,by:res.by,row:res.row,state:'queued',err:''});
+  if(SPH.length>200)SPH.length=200;
+  spRender();spFlush();
+}
+$('spHist').addEventListener('click',e=>{
+  const b=e.target.closest('[data-spretry]');
+  if(!b)return;
+  const it=SPH.find(x=>x.id===+b.dataset.spretry);
+  if(it){it.state='queued';spRender();spFlush()}
+});
+$('spCode').onkeydown=e=>{
+  if(e.key!=='Enter')return;
+  e.preventDefault();
+  const c=$('spCode').value.trim();
+  if(!c)return;
+  $('spCode').value='';spRecord(c);
+};
+
+/* 相機與照片 */
+async function startSp(){
+  if(!window.Html5Qrcode){toast('掃描元件載入失敗，請手動輸入');return}
+  await stopScan();
+  $('spReader').hidden=false;$('spScan').textContent='關閉';
+  const F=window.Html5QrcodeSupportedFormats;
+  const cfg={verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}};
+  if(F)cfg.formatsToSupport=[F.EAN_13,F.EAN_8,F.UPC_A,F.UPC_E,F.CODE_128,F.CODE_39,F.QR_CODE];
+  const gate=makeGate(m=>{$('spInfo').textContent=m});
+  $('spInfo').textContent='請把條碼放大到填滿框的一半以上寬度，保持穩定、避免反光';
+  sp3=new Html5Qrcode('spReader',cfg);
+  try{
+    await startCam(sp3,t=>{
+      if(!gate(t))return;
+      spRecord(t.trim());
+    });
+  }catch(e){
+    const n=(e&&e.name)||'',msg=String((e&&e.message)||e||'');
+    const blocked=n==='NotAllowedError'||/permission|denied|not allowed/i.test(msg);
+    toast((blocked?'相機被封鎖了：請允許相機權限':'無法開啟即時相機：'+(n||msg))+'\n請改按「照片」',6000);
+    stopSp();
+  }
+}
+async function stopSp(){
+  try{if(sp3){await sp3.stop();sp3.clear()}}catch(e){}
+  sp3=null;$('spReader').hidden=true;$('spInfo').textContent='';$('spScan').textContent='掃描';
+}
+$('spScan').onclick=()=>sp3?stopSp():startSp();
+$('spPic').onclick=()=>$('spPicFile').click();
+$('spPicFile').onchange=async e=>{
+  const f=e.target.files[0];e.target.value='';
+  if(!f||!window.Html5Qrcode)return;
+  try{
+    const h=new Html5Qrcode('spTmp');
+    const t=String(await h.scanFile(f,false)).trim();
+    if(!okPrefix(t)){toast('讀到的是 '+t+'，開頭不符，已略過'+prefixTip(),4500);return}
+    spRecord(t);
+  }catch(err){toast('讀不到條碼，請拍近一點、對焦後再試')}
+};
+
+/* 上傳 Excel：在瀏覽器解析，確認後才建立試算表分頁 */
+$('spPick').onclick=()=>$('spFile').click();
+$('spFile').onchange=async e=>{
+  const f=e.target.files[0];e.target.value='';
+  if(!f)return;
+  if(!window.XLSX){toast('Excel 解析元件載入失敗，請檢查網路後重新整理頁面',4000);return}
+  try{
+    const wb=XLSX.read(await f.arrayBuffer(),{type:'array'});
+    const all=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,raw:true,defval:''});
+    const h=all.findIndex(r=>r.some(v=>String(v).trim()!==''));
+    if(h<0)throw new Error('檔案是空的');
+    const width=Math.min(30,all.slice(h,h+300).reduce((m,r)=>Math.max(m,r.length),0));
+    if(width<5)throw new Error('欄位不足，條碼需放在 D 或 E 欄（至少要有 A～E 欄）');
+    const pad=r=>{const o=[];for(let i=0;i<width;i++)o.push(r[i]==null?'':String(r[i]).trim());return o};
+    const headers=pad(all[h]);
+    const rows=all.slice(h+1).map(pad).filter(r=>r.some(v=>v!==''));
+    if(!rows.length)throw new Error('找不到資料列');
+    if(rows.length>20000)throw new Error('資料超過 20000 筆，請拆成多個檔案');
+    const withKey=rows.filter(r=>r[3]||r[4]).length;
+    SPU={headers,rows};
+    $('spUp').innerHTML=`<div class="spbox no" style="border-color:var(--bd)"><div><b>${esc(f.name)}</b></div>
+      <div class="t">讀到 ${rows.length} 筆，其中 ${withKey} 筆有 D 或 E 欄條碼</div>
+      <div class="t">欄位：${esc(headers.filter(Boolean).join('、'))}</div>
+      <label for="spName">清單名稱（會建立「樣品-名稱」分頁）</label>
+      <input id="spName" value="${esc(f.name.replace(/\.[^.]+$/,'').slice(0,60))}" autocomplete="off">
+      <div class="row" style="margin-top:10px"><button class="btn" id="spUpBtn" type="button">上傳並建立分頁</button><button class="btn ghost" id="spUpCancel" type="button">取消</button></div></div>`;
+    $('spUpCancel').onclick=()=>{SPU=null;$('spUp').innerHTML=''};
+    $('spUpBtn').onclick=spUpload;
+  }catch(err){SPU=null;$('spUp').innerHTML='';toast('讀取 Excel 失敗：'+((err&&err.message)||''),5000)}
+};
+async function spUpload(){
+  if(!SPU)return;
+  const name=$('spName').value.trim();
+  if(!name){toast('請輸入清單名稱');return}
+  const exists=SPL.some(l=>l.name===name);
+  if(exists&&!confirm('已有同名清單「'+name+'」，要覆蓋嗎？'))return;
+  const b=$('spUpBtn');b.disabled=true;b.textContent='上傳中…';
+  try{
+    const r=await run('saveSampleList',{name,headers:SPU.headers,rows:SPU.rows,replace:exists});
+    toast('已建立分頁：樣品-'+r.name+'（'+r.rows+' 筆）',3500);
+    SPU=null;$('spUp').innerHTML='';
+    await spLoadLists(r.name);
+  }catch(err){
+    toast('上傳失敗：'+(err&&err.message==='EXISTS'?'已有同名清單，請換名稱或重新整理後選擇覆蓋':((err&&err.message)||'')),5000);
+    b.disabled=false;b.textContent='上傳並建立分頁';
+  }
+}
+$('spCard').addEventListener('toggle',()=>{
+  if($('spCard').open){if(!spLoaded){spLoaded=true;spLoadLists()}}
+  else stopSp();
+});
+
 function tab(n){
   $('p1').hidden=n!==1;$('p2').hidden=n!==2;$('p3').hidden=n!==3;
   $('t1').classList.toggle('on',n===1);$('t2').classList.toggle('on',n===2);$('t3').classList.toggle('on',n===3);
-  if(n!==1)stopScan();
+  if(n!==1){stopScan();stopSp()}
   if(n!==3)stopScan2();
   if(n===3&&!('ontouchstart' in window))$('scCode').focus();
 }
